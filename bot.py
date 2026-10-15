@@ -1,17 +1,43 @@
-import asyncio, os, re
-from collections import defaultdict
+import asyncio
+import os
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
 import requests
 from playwright.async_api import async_playwright
 
 URL = 'https://6wb7yh4qsg6n.com/login#/operations/workOrder'
 TZ = ZoneInfo('Asia/Jakarta')
 
+
 def secret(name):
-    v = os.getenv(name)
-    if not v: raise RuntimeError('Missing GitHub Secret: ' + name)
-    return v
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError('Missing GitHub Secret: ' + name)
+    return value
+
+
+def reply_to_start():
+    token = secret('TELEGRAM_BOT_TOKEN')
+    api = f'https://api.telegram.org/bot{token}'
+    response = requests.get(api + '/getUpdates', params={'timeout': 0}, timeout=20)
+    response.raise_for_status()
+    updates = response.json().get('result', [])
+    for update in updates:
+        message = update.get('message', {})
+        user = message.get('from', {})
+        if message.get('text', '').startswith('/start') and user.get('username', '').lower() == 'yongwan88':
+            requests.post(api + '/sendMessage', json={
+                'chat_id': message['chat']['id'],
+                'text': 'Bot aktif. Laporan status akan dikirim setiap 5 menit setelah kredensial dashboard dan chat ID dikonfigurasi.'
+            }, timeout=20).raise_for_status()
+    if updates:
+        requests.get(api + '/getUpdates', params={
+            'offset': max(item['update_id'] for item in updates) + 1,
+            'timeout': 0
+        }, timeout=20).raise_for_status()
+
 
 async def collect():
     async with async_playwright() as p:
@@ -21,20 +47,23 @@ async def collect():
         password = page.locator('input[type=password]')
         if await password.count():
             users = page.locator('input:not([type=password]):visible')
-            if not await users.count(): raise RuntimeError('Login field was not found')
+            if not await users.count():
+                raise RuntimeError('Dashboard login field was not found')
             await users.first.fill(secret('DASHBOARD_USERNAME'))
             await password.first.fill(secret('DASHBOARD_PASSWORD'))
-            login = page.get_by_role('button', name=re.compile('login|sign in|登录', re.I))
-            if await login.count(): await login.first.click()
-            else: await password.first.press('Enter')
+            button = page.get_by_role('button', name=re.compile('login|sign in|登录', re.I))
+            if await button.count():
+                await button.first.click()
+            else:
+                await password.first.press('Enter')
             await page.wait_for_timeout(5000)
-            if await password.count(): raise RuntimeError('Dashboard login failed')
+            if await password.count():
+                raise RuntimeError('Dashboard login failed')
         await page.goto(URL, wait_until='domcontentloaded', timeout=90000)
         await page.get_by_text('Work Order List', exact=True).click()
         await page.wait_for_timeout(1500)
         totals = {}
         for status in ('Processing', 'Pending', 'Completed'):
-            # Select the status filter and refresh the list.
             control = page.get_by_text(re.compile('^Processing$|^Pending$|^Completed$')).first
             await control.click()
             await page.get_by_text(status, exact=True).last.click()
@@ -42,18 +71,28 @@ async def collect():
             await page.wait_for_timeout(1300)
             body = await page.locator('body').inner_text()
             match = re.search(r'Total\s+(\d+)\s+items', body, re.I)
-            totals[status] = int(match.group(1)) if match else 0
+            if not match:
+                raise RuntimeError('Could not read the total for ' + status)
+            totals[status] = int(match.group(1))
         await browser.close()
     now = datetime.now(TZ).strftime('%Y-%m-%d %H:%M WIB')
-    return (f'Work Order hari ini\nProcessing: {totals["Processing"]}\n'
-            f'Pending: {totals["Pending"]}\nTotal completed: {totals["Completed"]}\nUpdate: {now}')
+    return (f'Work Order hari ini\nProcessing: {totals["Processing"]}'
+            f'\nPending: {totals["Pending"]}'
+            f'\nTotal completed: {totals["Completed"]}\nUpdate: {now}')
+
 
 async def main():
-    message = await collect()
-    token, chat = secret('TELEGRAM_BOT_TOKEN'), secret('TELEGRAM_CHAT_ID')
-    response = requests.post(f'https://api.telegram.org/bot{token}/sendMessage',
-        json={'chat_id': chat, 'text': message}, timeout=30)
+    reply_to_start()
+    report = await collect()
+    token = secret('TELEGRAM_BOT_TOKEN')
+    chat_id = secret('TELEGRAM_CHAT_ID')
+    response = requests.post(
+        f'https://api.telegram.org/bot{token}/sendMessage',
+        json={'chat_id': chat_id, 'text': report}, timeout=30)
     response.raise_for_status()
-    if not response.json().get('ok'): raise RuntimeError('Telegram sendMessage failed')
+    if not response.json().get('ok'):
+        raise RuntimeError('Telegram sendMessage failed')
 
-if __name__ == '__main__': asyncio.run(main())
+
+if __name__ == '__main__':
+    asyncio.run(main())
