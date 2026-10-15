@@ -80,6 +80,14 @@ async def collect():
                     raise RuntimeError('Dashboard login field was not found')
                 await users.first.fill(secret('DASHBOARD_USERNAME'))
                 await password.first.fill(secret('DASHBOARD_PASSWORD'))
+                visible_inputs = page.locator('input:visible')
+                if await visible_inputs.count() >= 3:
+                    totp_secret = os.getenv('DASHBOARD_TOTP_SECRET')
+                    if not totp_secret:
+                        raise RuntimeError('Dashboard requires Google Authenticator. Add the Base32 setup key as DASHBOARD_TOTP_SECRET in GitHub Actions Secrets.')
+                    import pyotp
+                    code = pyotp.TOTP(totp_secret.replace(' ', '')).now()
+                    await visible_inputs.nth(2).fill(code)
                 button = page.get_by_role('button', name=re.compile('login|sign in|登录', re.I))
                 if await button.count():
                     await button.first.click()
