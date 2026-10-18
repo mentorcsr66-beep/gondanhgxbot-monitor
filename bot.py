@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 import requests
 from playwright.async_api import async_playwright
 
-URL = os.getenv('DASHBOARD_URL', 'https://6wb7yh4qsg6n.com/login#/operations/workOrder')
+URL = os.getenv('DASHBOARD_URL') or 'https://6wb7yh4qsg6n.com/login#/operations/workOrder'
 TZ = ZoneInfo('Asia/Jakarta')
 STATUSES = ('Processing', 'Pending', 'Completed')
 
@@ -41,14 +41,12 @@ def reply_to_start():
 
 
 async def select_status(page, status):
-    # Target the Status filter in the Work Order List search form.
     status_form = page.locator('.ant-form-item').filter(
         has=page.get_by_text('Status', exact=True)
     )
     control = status_form.locator('.ant-select').first
     if await control.count() == 0:
-        # Fallback for dashboard builds that use a different component library.
-        control = page.get_by_text(re.compile(r'^(Processing|Pending|Completed)$')).first
+        raise RuntimeError('Could not find the Status filter on Work Order List')
     await control.click()
     option = page.locator('.ant-select-item-option-content').get_by_text(status, exact=True)
     if await option.count() == 0:
@@ -60,11 +58,10 @@ async def select_status(page, status):
 
 async def read_total_items(page, status):
     body = await page.locator('body').inner_text()
-    match = re.search(r'Total\s+([\d,]+)\s+items', body, re.I)
+    match = re.search(r'Totals+([d,]+)s+items', body, re.I)
     if match:
         return int(match.group(1).replace(',', ''))
-    # A clear failure helps identify localization or page-load changes in Actions logs.
-    raise RuntimeError('Could not read the Total items count for status: ' + status)
+    raise RuntimeError('Could not read Total items for status ' + status + '. Page text: ' + body[-1200:])
 
 
 async def collect():
@@ -82,25 +79,26 @@ async def collect():
                 await password.first.fill(secret('DASHBOARD_PASSWORD'))
                 visible_inputs = page.locator('input:visible')
                 if await visible_inputs.count() >= 3:
-                    totp_secret = os.getenv('DASHBOARD_TOTP_SECRET')
-                    if not totp_secret:
-                        raise RuntimeError('Dashboard requires Google Authenticator. Add the Base32 setup key as DASHBOARD_TOTP_SECRET in GitHub Actions Secrets.')
+                    totp_secret = secret('DASHBOARD_TOTP_SECRET').replace(' ', '')
                     import pyotp
-                    code = pyotp.TOTP(totp_secret.replace(' ', '')).now()
-                    await visible_inputs.nth(2).fill(code)
+                    await visible_inputs.nth(2).fill(pyotp.TOTP(totp_secret).now())
                 button = page.get_by_role('button', name=re.compile('login|sign in|登录', re.I))
                 if await button.count():
                     await button.first.click()
                 else:
                     await password.first.press('Enter')
-                await page.wait_for_timeout(5000)
+                await page.wait_for_timeout(6000)
                 if await password.count():
-                    raise RuntimeError('Dashboard login failed; check dashboard credentials')
+                    raise RuntimeError('Dashboard login failed; check dashboard username, password, and TOTP setup key')
 
-            # The supplied URL opens Operations > Work Order > Work Order List directly.
-            # Do not click the tab label: the site decorates/localizes that label.
-            await page.goto(URL, wait_until='domcontentloaded', timeout=90000)
-            await page.locator('table').first.wait_for(state='visible', timeout=30000)
+            # Keep the authenticated single-page app alive; reloading the login URL can discard its in-memory session.
+            table = page.locator('.ant-table').first
+            try:
+                await table.wait_for(state='visible', timeout=45000)
+            except Exception as exc:
+                body = await page.locator('body').inner_text()
+                raise RuntimeError(f'Work Order List did not load. URL={page.url}; page text: {body[-1200:]}') from exc
+
             totals = {}
             for status in STATUSES:
                 await select_status(page, status)
