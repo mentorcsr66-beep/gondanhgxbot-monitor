@@ -52,13 +52,13 @@ async def select_status(page, status):
     if await option.count() == 0:
         option = page.get_by_text(status, exact=True).last
     await option.click()
-    await page.get_by_role('button', name=re.compile(r'^Search$', re.I)).click()
+    await page.get_by_role('button', name=re.compile('^Search$', re.I)).click()
     await page.wait_for_timeout(1400)
 
 
 async def read_total_items(page, status):
     body = await page.locator('body').inner_text()
-    match = re.search(r'Totals+([d,]+)s+items', body, re.I)
+    match = re.search('Total +([0-9,]+) +items', body, re.I)
     if match:
         return int(match.group(1).replace(',', ''))
     raise RuntimeError('Could not read Total items for status ' + status + '. Page text: ' + body[-1200:])
